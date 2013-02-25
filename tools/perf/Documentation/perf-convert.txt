@@ -1,0 +1,55 @@
+perf-convert(1)
+================
+
+NAME
+----
+perf-convert - Convert perf.data (created by perf record) to a callgrind data file.
+
+SYNOPSIS
+--------
+[verse]
+'perf convert' [-i <file> | --input=file] [-o <file> | --output=file]
+
+DESCRIPTION
+-----------
+This command converts the input file to a callgrind data file which can be 
+subsequently displayed with kcachegrind.
+
+OPTIONS
+-------
+-i::
+--input=::
+        Input file name. (default: perf.data unless stdin is a fifo)
+
+-o::
+--output=::
+        Output file name. (default: callgrind.out)
+
+-d::
+--dsos=<dso[,dso...]>::
+        Only consider symbols in these dsos.
+
+-f::
+--force::
+        Don't complain, do it.
+
+-k::
+--vmlinux=<file>::
+        vmlinux pathname.
+
+-m::
+--modules::
+        Load module symbols. WARNING: use only with -k and LIVE kernel.
+
+-C::
+--cpu:: Only report samples for the list of CPUs provided. Multiple CPUs can
+	be provided as a comma-separated list with no space: 0,1. Ranges of
+	CPUs are specified with -: 0-2. Default is to report samples on all
+	CPUs.
+
+--symfs=<directory>::
+        Look for files with symbols relative to this directory.
+
+SEE ALSO
+--------
+linkperf:perf-record[1], linkperf:perf-report[1]
