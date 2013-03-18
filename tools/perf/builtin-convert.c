@@ -37,6 +37,7 @@ struct perf_convert {
 	bool	   force;
 	const char *cpu_list;
 	DECLARE_BITMAP(cpu_bitmap, MAX_NR_CPUS);
+	struct rb_root graph_root;
 };
 
 static int process_sample_event(struct perf_tool *tool,
@@ -58,7 +59,8 @@ static int process_sample_event(struct perf_tool *tool,
 	if (cnv->cpu_list && !test_bit(sample->cpu, cnv->cpu_bitmap))
 		return 0;
 
-	if (!al.filtered && cg_cnv_sample(evsel, sample, &al)) {
+	if (!al.filtered && cg_cnv_sample(evsel, sample, &al, machine,
+	      				  &cnv->graph_root)) {
 		pr_warning("problem incrementing symbol count, skipping event\n");
 		return -1;
 	}
@@ -136,6 +138,8 @@ static int __cmd_convert(struct perf_convert *cnv)
 			hists__output_resort(hists);
 			hists__find_annotations(hists, pos->idx, cnv);
 		}
+
+		cg_cnv_callgraph(cnv->output_file, cnv->graph_root.rb_node);
 	}
 
 	if (total_nr_samples == 0) {
@@ -177,6 +181,7 @@ int cmd_convert(int argc, const char **argv, const char *prefix __maybe_unused)
 			.ordered_samples = true,
 			.ordering_requires_timestamps = true,
 		},
+		.graph_root = RB_ROOT,
 	};
 	const struct option options[] = {
 	OPT_STRING('i', "input", &convert.input_name, "file",
@@ -200,6 +205,16 @@ int cmd_convert(int argc, const char **argv, const char *prefix __maybe_unused)
 
 	symbol_conf.priv_size = sizeof(struct annotation);
 	symbol_conf.try_vmlinux_path = true;
+	symbol_conf.use_callchain = true;
+
+	callchain_param.mode = CHAIN_GRAPH_REL;
+	callchain_param.order = ORDER_CALLEE;
+
+	//TODO: if I remove the following 3 lines perf segfaults...
+	if (callchain_register_param(&callchain_param) < 0) {
+	 	fprintf(stderr, "Can't register callchain params\n");
+		return -1;
+	}
 
 	convert.output_file = fopen(output_filename, "w");
 	if (!convert.output_file) {

@@ -5,13 +5,33 @@
 #include "evsel.h"
 #include "session.h"
 
+#include <linux/rbtree.h>
+#include <linux/list.h>
+
 #include <stdio.h>
+
+struct callee_list {
+  struct list_head list;
+  struct map *map;
+  struct symbol *sym;
+  u64 hits[];
+};
+
+struct graph_node {
+  u64 address;
+  struct rb_node rb_node;
+  struct map *map;
+  struct symbol *sym;
+  struct callee_list callees;
+};
 
 int cg_cnv_header(FILE *output, struct perf_session *session);
 int cg_cnv_sample(struct perf_evsel *evsel, struct perf_sample *sample,
-		  struct addr_location *al);
+		  struct addr_location *al, struct machine *machine,
+		  struct rb_root *graph_root);
 void cg_cnv_unresolved(FILE *output, int evidx, struct hist_entry *he);
 int cg_cnv_symbol(FILE *output, struct symbol *sym, struct map *map);
+void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node);
 
 #endif
 
