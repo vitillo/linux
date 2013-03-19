@@ -85,8 +85,6 @@ static void graph_node__add_callee(struct graph_node *node, struct map *map,
 	callee->address = address;
 	list_add(&callee->list, &node->callees.list);
 
-	return;
-
 incr:
 	callee->hits[idx]++;
 }
