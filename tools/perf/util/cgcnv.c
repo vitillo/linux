@@ -118,19 +118,12 @@ int cg_cnv_sample(struct perf_evsel *evsel, struct perf_sample *sample,
 		if (!caller)
 		  break;
 
-		/*if (caller->sym && callee->sym) {*/
-		  	//printf("%s -> %s\n", caller->sym->name, callee->sym->name);
-
 		node = get_graph_node(graph_root, caller->map, caller->sym,
 		    		      caller->ip);
 		graph_node__add_callee(node, callee->map, callee->sym,
 		    		       callee->ip, evsel->idx);
 
-		//TODO: Handle other 3 cases
 		callee = caller;
-
-		//TODO: To compare two symbols in the hashtable just use the the sym->start, 
-		//or the IP address (if sym == NULL). There is no need to compare library names or function names!
 	}
 
 	ret = 0;
@@ -186,6 +179,7 @@ static void cg_sym_events_printf(FILE *output, struct symbol *sym,
 	unsigned line;
 	const char *filename;
 
+	//TODO: handle inlining like in cg_sym_header
 	ret = addr2line(map__rip_2objdump(map, sym->start) + offset,
 			&filename, &line);
 	if (filename && last_source_name && strcmp(filename, last_source_name)) {
@@ -237,7 +231,8 @@ void cg_cnv_unresolved(FILE *output, int evidx, struct hist_entry *he)
 	int idx;
 
 	fprintf(output, "ob=%s\n", he->ms.map->dso->long_name);
-	fprintf(output, "fn=%#" PRIx64 "\n", he->ip);
+	/*fprintf(output, "fn=%#" PRIx64 "\n", he->ip);*/
+	fprintf(output, "fn=\n");
 
 	fprintf(output, "0 0");
 	for (idx = 0; idx < evidx; idx++)
@@ -313,7 +308,8 @@ void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node){
 	}else{
 		fprintf(output, "ob=%s\n", node->map ? node->map->dso->long_name : "");
 		fprintf(output, "fl=\n");
-		fprintf(output, "fn=%#" PRIx64 "\n", node->address);
+		/*fprintf(output, "fn=%#" PRIx64 "\n", node->address);*/
+		fprintf(output, "fn=\n");
 	}
 
 
@@ -335,7 +331,8 @@ void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node){
 		}else{
 			fprintf(output, "cob=%s\n", callee->map ? callee->map->dso->long_name : "");
 			fprintf(output, "cfl=\n");
-			fprintf(output, "cfn=%#" PRIx64 "\n", callee->address);
+			/*fprintf(output, "cfn=%#" PRIx64 "\n", callee->address);*/
+			fprintf(output, "cfn=\n");
 		
 		}
 
