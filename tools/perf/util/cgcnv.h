@@ -14,6 +14,7 @@ struct callee_list {
   struct list_head list;
   struct map *map;
   struct symbol *sym;
+  u64 address;
   u64 hits[];
 };
 
@@ -25,6 +26,7 @@ struct graph_node {
   struct callee_list callees;
 };
 
+void cg_set_nr_events(u64 nr_events);
 int cg_cnv_header(FILE *output, struct perf_session *session);
 int cg_cnv_sample(struct perf_evsel *evsel, struct perf_sample *sample,
 		  struct addr_location *al, struct machine *machine,

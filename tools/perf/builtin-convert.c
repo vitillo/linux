@@ -112,7 +112,9 @@ static int __cmd_convert(struct perf_convert *cnv)
 				    cnv->force, false, &cnv->tool);
 	if (session == NULL)
 		return -ENOMEM;
-
+	
+	cg_set_nr_events(session->evlist->nr_entries);
+	
 	if (cnv->cpu_list) {
 		ret = perf_session__cpu_bitmap(session, cnv->cpu_list,
 					       cnv->cpu_bitmap);

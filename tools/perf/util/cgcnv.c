@@ -14,11 +14,14 @@ static unsigned last_line;
 static u64 last_off;
 static u64 nr_events;
 
+void cg_set_nr_events(u64 nr){
+	nr_events = nr;
+}
+
 int cg_cnv_header(FILE *output, struct perf_session *session)
 {
 	struct perf_evsel *pos;
 
-	nr_events = session->evlist->nr_entries;
 	fprintf(output, "positions: instr line\nevents:");
 	list_for_each_entry(pos, &session->evlist->entries, node) {
 		const char *evname = NULL;
@@ -68,17 +71,21 @@ static struct graph_node *get_graph_node(struct rb_root *root, struct map *map,
 }
 
 static void graph_node__add_callee(struct graph_node *node, struct map *map,
-    				   struct symbol *sym, int idx){
+    				   struct symbol *sym, u64 ip, int idx){
   	struct callee_list *callee;
+	u64 address = sym ? sym->start : ip;
 
 	list_for_each_entry(callee, &node->callees.list, list)
-	 	if (callee->sym->start == sym->start)
+	 	if (callee->address == address)
 		  	goto incr;
 
 	callee = calloc(sizeof(struct callee_list) + nr_events*sizeof(u64), 1);
 	callee->map = map;
 	callee->sym = sym;
+	callee->address = address;
 	list_add(&callee->list, &node->callees.list);
+
+	return;
 
 incr:
 	callee->hits[idx]++;
@@ -113,13 +120,14 @@ int cg_cnv_sample(struct perf_evsel *evsel, struct perf_sample *sample,
 		if (!caller)
 		  break;
 
-		if (caller->sym && callee->sym) {
-		  	;//printf("%s -> %s\n", caller->sym->name, callee->sym->name);
+		/*if (caller->sym && callee->sym) {*/
+		  	//printf("%s -> %s\n", caller->sym->name, callee->sym->name);
 
-			node = get_graph_node(graph_root, caller->map, caller->sym, caller->ip);
-			graph_node__add_callee(node, callee->map, callee->sym,
-			    		       evsel->idx);
-		}
+		node = get_graph_node(graph_root, caller->map, caller->sym,
+		    		      caller->ip);
+		graph_node__add_callee(node, callee->map, callee->sym,
+		    		       callee->ip, evsel->idx);
+
 		//TODO: Handle other 3 cases
 		callee = caller;
 
@@ -290,42 +298,58 @@ void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node){
 
 	node = rb_entry(rb_node, struct graph_node, rb_node);
 
-	if(node->sym) {
-	  	fprintf(output, "ob=%s\n", node->map->dso->long_name);
+	if (node->sym) {
+		fprintf(output, "ob=%s\n", node->map->dso->long_name);
 
-		if (!addr2line_init(node->map->dso->long_name)){
-		  	addr2line(map__rip_2objdump(node->map, node->sym->start),
-			   			    &filename, &line);
-			if (filename)
-				fprintf(output, "fl=%s\n", filename);
+	 	if(!addr2line_init(node->map->dso->long_name)){
+			addr2line(map__rip_2objdump(node->map, node->sym->start), &filename, &line);
+			fprintf(output, "fl=%s\n", filename ? filename : "");
 			addr2line_cleanup();
+		}else{
+			fprintf(output, "fl=\n");
 		}
 
 		// Function name needs to be printed out after ob and fl, otherwise kcachegrind 
 		// doesn't display the callchains correctly
 		fprintf(output, "fn=%s\n", node->sym->name);
-		
-		list_for_each_entry(callee, &node->callees.list, list){
-	  		fprintf(output, "cob=%s\n", callee->map->dso->long_name);
+	}else{
+		fprintf(output, "ob=%s\n", node->map ? node->map->dso->long_name : "");
+		fprintf(output, "fl=\n");
+		fprintf(output, "fn=%#" PRIx64 "\n", node->address);
+	}
+
+
+	list_for_each_entry(callee, &node->callees.list, list){
+		if(callee->sym){
+			fprintf(output, "cob=%s\n", callee->map->dso->long_name);
 			if (!addr2line_init(callee->map->dso->long_name)){
 				addr2line(map__rip_2objdump(callee->map, callee->sym->start),
 							    &filename, &line);
 				if (filename)
 					fprintf(output, "cfl=%s\n", filename);
+				else
+				  	fprintf(output, "cfl=\n");
+
 				addr2line_cleanup();
 			}
-		  	fprintf(output, "cfn=%s\n", callee->sym->name);
+			fprintf(output, "cfn=%s\n", callee->sym->name);
 
-			fprintf(output, "calls=");
-			for (i = 0; i < nr_events; i++)
-			  	fprintf(output, "%" PRIu64 " ", callee->hits[i]);
-
-			fprintf(output, "\n0 0 ");
-			for (i = 0; i < nr_events; i++)
-			  	fprintf(output, "%" PRIu64 " ", callee->hits[i]);
-
-			fprintf(output, "\n");
+		}else{
+			fprintf(output, "cob=%s\n", callee->map ? callee->map->dso->long_name : "");
+			fprintf(output, "cfl=\n");
+			fprintf(output, "cfn=%#" PRIx64 "\n", callee->address);
+		
 		}
+
+		fprintf(output, "calls=");
+		for (i = 0; i < nr_events; i++)
+			fprintf(output, "%" PRIu64 " ", callee->hits[i]);
+
+		fprintf(output, "\n0 0 ");
+		for (i = 0; i < nr_events; i++)
+			fprintf(output, "%" PRIu64 " ", callee->hits[i]);
+
+		fprintf(output, "\n");
 	}
 
 	cg_cnv_callgraph(output, rb_node->rb_left);
