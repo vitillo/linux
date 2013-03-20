@@ -7,11 +7,13 @@
 #include <bfd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <linux/kernel.h>
 
 static const char *filename;
 static const char *functionname;
+static const char *last_opened_file;
 static unsigned int line;
 static asymbol **syms;
 static bfd_vma pc;
@@ -91,6 +93,11 @@ static void find_address_in_section(bfd *self, asection *section,
 
 int addr2line_init(const char *file_name)
 {
+	if(last_opened_file && !strcmp(last_opened_file, file_name))
+		return 0;
+	else
+		addr2line_cleanup();
+	
 	abfd = bfd_openr(file_name, NULL);
 	if (abfd == NULL)
 		return -1;
@@ -98,6 +105,7 @@ int addr2line_init(const char *file_name)
 	if (!bfd_check_format(abfd, bfd_object))
 		return bfd_fatal(bfd_get_filename(abfd));
 
+	last_opened_file = file_name;
 	return slurp_symtab();
 
 }
@@ -109,16 +117,23 @@ void addr2line_cleanup(void)
 		syms = NULL;
 	}
 
-	bfd_close(abfd);
+	if (abfd)
+		bfd_close(abfd);
+
 	line = found = 0;
+	last_opened_file = NULL;
+	abfd = 0;
 }
 
 int addr2line_inline(const char **file, unsigned *line_nr)
 {
 
 	found = bfd_find_inliner_info(abfd, &filename, &functionname, &line);
-	*file = filename;
-	*line_nr = line;
+
+	if (found){
+		*file = filename;
+		*line_nr = line;
+	}
 
 	return found;
 }
@@ -129,8 +144,10 @@ int addr2line(unsigned long addr, const char **file, unsigned *line_nr)
 	pc = addr;
 	bfd_map_over_sections(abfd, find_address_in_section, NULL);
 
-	*file = filename;
-	*line_nr = line;
+	if (found) {
+		*file = filename;
+		*line_nr = line;
+	}
 
 	return found;
 }

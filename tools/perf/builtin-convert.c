@@ -68,45 +68,10 @@ static int process_sample_event(struct perf_tool *tool,
 	return 0;
 }
 
-static void hists__find_annotations(struct hists *self, int evidx,
-				    struct perf_convert *cnv)
-{
-	struct rb_node *nd = rb_first(&self->entries);
-	int key = K_RIGHT;
-
-	while (nd) {
-		struct hist_entry *he = rb_entry(nd, struct hist_entry, rb_node);
-		struct annotation *notes;
-
-		if (he->ms.sym == NULL || he->ms.map->dso->annotate_warned) {
-			cg_cnv_unresolved(cnv->output_file, evidx, he);
-			goto find_next;
-		}
-
-		notes = symbol__annotation(he->ms.sym);
-
-		if (notes->src == NULL) {
-find_next:
-			if (key == K_LEFT)
-				nd = rb_prev(nd);
-			else
-				nd = rb_next(nd);
-			continue;
-		}
-
-		cg_cnv_symbol(cnv->output_file, he->ms.sym, he->ms.map, &cnv->graph_root);
-
-		free(notes->src);
-		notes->src = NULL;
-	}
-}
-
 static int __cmd_convert(struct perf_convert *cnv)
 {
 	int ret;
 	struct perf_session *session;
-	struct perf_evsel *pos;
-	u64 total_nr_samples = 0;
 
 	session = perf_session__new(cnv->input_name, O_RDONLY,
 				    cnv->force, false, &cnv->tool);
@@ -130,24 +95,7 @@ static int __cmd_convert(struct perf_convert *cnv)
 	if (ret)
 		goto out_delete;
 
-	list_for_each_entry(pos, &session->evlist->entries, node) {
-		struct hists *hists = &pos->hists;
-		u32 nr_samples = hists->stats.nr_events[PERF_RECORD_SAMPLE];
-
-		if (nr_samples > 0) {
-			total_nr_samples += nr_samples;
-			hists__collapse_resort(hists);
-			hists__output_resort(hists);
-			hists__find_annotations(hists, pos->idx, cnv);
-		}
-	}
-
 	cg_cnv_callgraph(cnv->output_file, &cnv->graph_root, cnv->graph_root.rb_node);
-
-	if (total_nr_samples == 0) {
-		ui__error("The %s file has no samples!\n", session->filename);
-		goto out_delete;
-	}
 
 out_delete:
 	/*

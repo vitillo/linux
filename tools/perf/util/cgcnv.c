@@ -24,27 +24,20 @@ int cg_cnv_header(FILE *output, struct perf_session *session)
 
 	fprintf(output, "positions: instr line\nevents:");
 	list_for_each_entry(pos, &session->evlist->entries, node) {
-		const char *evname = NULL;
-		struct hists *hists = &pos->hists;
-		u32 nr_samples = hists->stats.nr_events[PERF_RECORD_SAMPLE];
-
-		if (nr_samples > 0) {
-			evname = perf_evsel__name(pos);
-			fprintf(output, " %s", evname);
-		}
+		const char *evname = perf_evsel__name(pos);
+		fprintf(output, " %s", evname);
 	}
 	fprintf(output, "\n");
 
 	return 0;
 }
 
-static struct graph_node *get_graph_node(struct rb_root *root, struct map *map,
-    					 struct symbol *sym, u64 ip, 
-					 const char *filename, bool insert)
+static struct graph_node *add_graph_node(struct rb_root *root, struct map *map,
+					 struct symbol *sym, u64 ip)
 {
 	struct rb_node **rb_node = &root->rb_node, *parent = NULL;
 	struct graph_node *node;
-	u64 address = sym ? sym->start : ip;
+	u64 address = sym ? sym->start : map ? map->start : ip;
 
 	while (*rb_node){
 	  	parent = *rb_node;
@@ -54,22 +47,15 @@ static struct graph_node *get_graph_node(struct rb_root *root, struct map *map,
 		 	rb_node = &(*rb_node)->rb_left;
 		else if (address > node->address)
 		  	rb_node = &(*rb_node)->rb_right;
-		else{
-			if(filename)
-				node->filename = filename;
-
+		else
 		  	return node;
-		}
 	}
 
-	if(!insert)
-		return NULL;
-
-	node = malloc(sizeof(struct graph_node));
+	node = calloc(1, sizeof(*node) + nr_events * sizeof(node->hits[0]));
 	node->map = map;
 	node->sym = sym;
 	node->address = address;
-	node->filename = filename;
+	node->filename = "";
 	INIT_LIST_HEAD(&node->callees);
 
 	rb_link_node(&node->rb_node, parent, rb_node);
@@ -78,16 +64,35 @@ static struct graph_node *get_graph_node(struct rb_root *root, struct map *map,
 	return node;
 }
 
+static struct graph_node *get_graph_node(struct rb_root *root, u64 address)
+{
+	struct rb_node *rb_node = root->rb_node;
+	struct graph_node *node;
+
+	while (rb_node){
+		node = rb_entry(rb_node, struct graph_node, rb_node);
+
+		if (address < node->address)
+		 	rb_node = rb_node->rb_left;
+		else if (address > node->address)
+		  	rb_node = rb_node->rb_right;
+		else
+		  	return node;
+	}
+
+	return NULL;
+}
+
 static void graph_node__add_callee(struct graph_node *node, struct map *map,
     				   struct symbol *sym, u64 ip, int idx){
   	struct callee_list *callee;
-	u64 address = sym ? sym->start : ip;
+	u64 address = sym ? sym->start : map ? map->start : ip;
 
 	list_for_each_entry(callee, &node->callees, list)
 	 	if (callee->address == address)
 		  	goto incr;
 
-	callee = calloc(1, sizeof(struct callee_list) + nr_events *
+	callee = calloc(1, sizeof(*callee) + nr_events *
 			sizeof(callee->hits[0]));
 	callee->map = map;
 	callee->sym = sym;
@@ -116,8 +121,8 @@ static void add_callchain_to_callgraph(struct perf_evsel *evsel,
 		if (!caller)
 		  break;
 
-		node = get_graph_node(graph_root, caller->map, caller->sym,
-		    		      caller->ip, NULL, true);
+		node = add_graph_node(graph_root, caller->map, caller->sym,
+		    		      caller->ip);
 		graph_node__add_callee(node, callee->map, callee->sym,
 		    		       callee->ip, evsel->idx);
 
@@ -130,31 +135,34 @@ int cg_cnv_sample(struct perf_evsel *evsel, struct perf_sample *sample,
 		  struct rb_root *graph_root)
 {
   	struct symbol *parent = NULL;
-	struct hist_entry *he;
-	int ret = 0;
+	struct graph_node *node;
+	int err = 0;
 
 	if (sample->callchain) {
-	  ret = machine__resolve_callchain(machine, evsel, al->thread, sample, 
-	      				   &parent);
+		err = machine__resolve_callchain(machine, evsel, al->thread,
+						 sample, &parent);
+
+		if (err)
+			return err;
 	}
 
-	he = __hists__add_entry(&evsel->hists, al, NULL, 1);
-	if (he == NULL)
-		return -ENOMEM;
-
+	node = add_graph_node(graph_root, al->map, al->sym, al->addr);
 	add_callchain_to_callgraph(evsel, graph_root);
+	node->hits[evsel->idx]++;
 
-	ret = 0;
-	if (he->ms.sym != NULL) {
-		struct annotation *notes = symbol__annotation(he->ms.sym);
-		if (notes->src == NULL && symbol__alloc_hist(he->ms.sym) < 0)
+	if (node->sym != NULL) {
+		struct annotation *notes = symbol__annotation(node->sym);
+		if (notes->src == NULL && symbol__alloc_hist(node->sym) < 0)
 			return -ENOMEM;
 
-		ret = hist_entry__inc_addr_samples(he, evsel->idx, al->addr);
+		err = symbol__inc_addr_samples(node->sym, node->map, evsel->idx, al->addr);
+
+		if (err)
+			return err;
 	}
 
 	hists__inc_nr_events(&evsel->hists, PERF_RECORD_SAMPLE);
-	return ret;
+	return 0;
 }
 
 static void cg_sym_header_printf(FILE *output, struct symbol *sym,
@@ -231,48 +239,64 @@ static void cg_sym_total_printf(FILE *output, struct annotation *notes)
 	fprintf(output, "\n");
 }
 
-void cg_cnv_unresolved(FILE *output, int evidx, struct hist_entry *he)
+static void cg_cnv_unresolved(FILE *output, struct graph_node *node)
 {
-	int idx;
+	unsigned idx;
 
-	fprintf(output, "ob=%s\n", he->ms.map->dso->long_name);
+	fprintf(output, "ob=%s\n", node->map ? node->map->dso->long_name : "");
 	fprintf(output, "fl=\n");
 	fprintf(output, "fn=\n");
 
 	fprintf(output, "0 0");
-	for (idx = 0; idx < evidx; idx++)
-		fprintf(output, " 0");
-	fprintf(output, " %" PRIu32, he->stat.nr_events);
+	for (idx = 0; idx < nr_events; idx++)
+		fprintf(output, " %" PRIu64, node->hits[idx]);
 	fprintf(output, "\n");
 }
 
-int cg_cnv_symbol(FILE *output, struct symbol *sym, struct map *map, struct rb_root *graph_root)
+static int cg_cnv_symbol(FILE *output, struct graph_node *node)
 {
-	const char *filename = map->dso->long_name;
-	struct annotation *notes = symbol__annotation(sym);
-	u64 sym_len = sym->end - sym->start, i;
+	struct annotation *notes;
+	struct map *map = node->map;
+	struct symbol *sym = node->sym;
+	const char *dso_name, *filename = "";
+	u64 sym_len, i;
 	unsigned line;
-
-	fprintf(output, "ob=%s\n", filename);
+	
+	if(!map || !sym){
+		cg_cnv_unresolved(output, node);
+		return -1;
+	}
+	
+	dso_name = map->dso->long_name;
+	notes = symbol__annotation(sym);
+	sym_len = sym->end - sym->start;
 
 	if (addr2line_init(map->dso->long_name)) {
+		if(!notes->src) // No samples
+			return -1;
+
+		fprintf(output, "ob=%s\n", dso_name);
 	  	fprintf(output, "fl=\n");
 		fprintf(output, "fn=%s\n", sym->name);
 		cg_sym_total_printf(output, notes);
 		return -EINVAL;
 	}
 
-	/* kcachegrind wants the fl declaration before the fn one */
-	if(addr2line(map__rip_2objdump(map, sym->start), &filename, &line)){
-		fprintf(output, "fl=%s\n", filename);
-	}else{
-	  	fprintf(output, "fl=\n");
-	}
-
+	addr2line(map__rip_2objdump(map, sym->start), &filename, &line);
+	
+	/* Cache filename to speedup the callgraph generation */
+	node->filename = strdup(filename);
+		
+	if(!notes->src)
+		return -1;
+	
+	/* KCachegrind wants the fl declaration before the fn one */
+	fprintf(output, "ob=%s\n", dso_name);
+	fprintf(output, "fl=%s\n", filename);
 	fprintf(output, "fn=%s\n", sym->name);
 
-	/* Cache fl to speedup the callgraph generation */
-	get_graph_node(graph_root, map, sym, 0, strdup(filename ? filename : ""), true);
+	/* Cache filename to speedup the callgraph generation */
+	node->filename = strdup(filename ? filename : "");
 
 	for (i = 0; i < sym_len; i++) {
 		if (cg_check_events(notes, i)) {
@@ -286,16 +310,26 @@ int cg_cnv_symbol(FILE *output, struct symbol *sym, struct map *map, struct rb_r
 			cg_sym_events_printf(output, sym, map, notes, i);
 	}
 
-	addr2line_cleanup();
-
 	return 0;
 }
 
-void cg_cnv_callgraph(FILE *output, struct rb_root *graph_root, struct rb_node *rb_node){
+static void scan_callgraph(FILE *output, struct rb_node *rb_node){
 	struct graph_node *node;
+
+	if(!rb_node)
+		return;
+
+	node = rb_entry(rb_node, struct graph_node, rb_node);
+	scan_callgraph(output, rb_node->rb_left);
+	cg_cnv_symbol(output, node);
+	scan_callgraph(output, rb_node->rb_right);
+}
+
+static void dump_callgraph(FILE *output, struct rb_root *graph_root,
+			   struct rb_node *rb_node){
+	struct graph_node *node, *callee_node;
 	struct callee_list *callee;
-	const char *filename;
-	unsigned i, line;
+	unsigned i;
 
   	if(!rb_node)
 	  return;
@@ -304,16 +338,7 @@ void cg_cnv_callgraph(FILE *output, struct rb_root *graph_root, struct rb_node *
 
 	if (node->sym) {
 		fprintf(output, "ob=%s\n", node->map->dso->long_name);
-
-	 	/*if (!addr2line_init(node->map->dso->long_name)){
-			addr2line(map__rip_2objdump(node->map, node->sym->start), &filename, &line);
-			fprintf(output, "fl=%s\n", filename ? filename : "");
-			addr2line_cleanup();
-		}else{
-			fprintf(output, "fl=\n");
-		}*/
 		fprintf(output, "fl=%s\n", node->filename);
-
 		fprintf(output, "fn=%s\n", node->sym->name);
 	}else{
 		fprintf(output, "ob=%s\n", node->map ? node->map->dso->long_name : "");
@@ -321,32 +346,15 @@ void cg_cnv_callgraph(FILE *output, struct rb_root *graph_root, struct rb_node *
 		fprintf(output, "fn=\n");
 	}
 
-
 	list_for_each_entry(callee, &node->callees, list){
 		if(callee->sym){
-			struct graph_node *tmp;
-
 			fprintf(output, "cob=%s\n", callee->map->dso->long_name);
-
-			tmp = get_graph_node(graph_root, callee->map, callee->sym, 0, NULL, false);
-			
-			if(tmp)
-				fprintf(output, "cfl=%s\n", tmp->filename);
-			else if (!addr2line_init(callee->map->dso->long_name)){
-				addr2line(map__rip_2objdump(callee->map, callee->sym->start),
-							    &filename, &line);
-				if (filename)
-					fprintf(output, "cfl=%s\n", filename);
-				else
-				  	fprintf(output, "cfl=\n");
-
-				addr2line_cleanup();
-			}else
-				fprintf(output, "cfl=\n");
-
+			callee_node = get_graph_node(graph_root, callee->address);
+			fprintf(output, "cfl=%s\n", callee_node->filename);
 			fprintf(output, "cfn=%s\n", callee->sym->name);
 		}else{
-			fprintf(output, "cob=%s\n", callee->map ? callee->map->dso->long_name : "");
+			fprintf(output, "cob=%s\n", callee->map ? 
+				callee->map->dso->long_name : "");
 			fprintf(output, "cfl=\n");
 			fprintf(output, "cfn=\n");
 		
@@ -363,6 +371,11 @@ void cg_cnv_callgraph(FILE *output, struct rb_root *graph_root, struct rb_node *
 		fprintf(output, "\n");
 	}
 
-	cg_cnv_callgraph(output, graph_root, rb_node->rb_left);
-	cg_cnv_callgraph(output, graph_root, rb_node->rb_right);
+	dump_callgraph(output, graph_root, rb_node->rb_left);
+	dump_callgraph(output, graph_root, rb_node->rb_right);
+}
+
+void cg_cnv_callgraph(FILE *output, struct rb_root *graph_root, struct rb_node *rb_node){
+	scan_callgraph(output, rb_node);
+	dump_callgraph(output, graph_root, rb_node);
 }
