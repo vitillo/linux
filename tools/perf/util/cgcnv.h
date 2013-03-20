@@ -15,7 +15,7 @@ struct callee_list {
   struct map *map;
   struct symbol *sym;
   u64 address;
-  u64 hits[];
+  u64 hits[0];
 };
 
 struct graph_node {
@@ -23,7 +23,7 @@ struct graph_node {
   struct rb_node rb_node;
   struct map *map;
   struct symbol *sym;
-  struct callee_list callees;
+  struct list_head callees;
 };
 
 void cg_set_nr_events(u64 nr_events);

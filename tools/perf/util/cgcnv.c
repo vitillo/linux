@@ -58,11 +58,11 @@ static struct graph_node *get_graph_node(struct rb_root *root, struct map *map,
 		}
 	}
 
-	node = calloc(sizeof(struct graph_node) + nr_events*sizeof(u64), 1);
+	node = malloc(sizeof(struct graph_node));
 	node->map = map;
 	node->sym = sym;
 	node->address = address;
-	INIT_LIST_HEAD(&node->callees.list);
+	INIT_LIST_HEAD(&node->callees);
 
 	rb_link_node(&node->rb_node, parent, rb_node);
 	rb_insert_color(&node->rb_node, root);
@@ -75,41 +75,31 @@ static void graph_node__add_callee(struct graph_node *node, struct map *map,
   	struct callee_list *callee;
 	u64 address = sym ? sym->start : ip;
 
-	list_for_each_entry(callee, &node->callees.list, list)
+	list_for_each_entry(callee, &node->callees, list)
 	 	if (callee->address == address)
 		  	goto incr;
 
-	callee = calloc(sizeof(struct callee_list) + nr_events*sizeof(u64), 1);
+	callee = calloc(1, sizeof(struct callee_list) + nr_events *
+			sizeof(callee->hits[0]));
 	callee->map = map;
 	callee->sym = sym;
 	callee->address = address;
-	list_add(&callee->list, &node->callees.list);
+	list_add(&callee->list, &node->callees);
 
 incr:
 	callee->hits[idx]++;
 }
 
-int cg_cnv_sample(struct perf_evsel *evsel, struct perf_sample *sample,
-		  struct addr_location *al, struct machine *machine,
-		  struct rb_root *graph_root)
-{
-  	struct symbol *parent = NULL;
-	struct hist_entry *he;
+static void add_callchain_to_callgraph(struct perf_evsel *evsel,
+    				       struct rb_root *graph_root){
 	struct callchain_cursor_node *caller, *callee;
 	struct graph_node *node;
-	int ret = 0;
-
-	if (sample->callchain) {
-	  ret = machine__resolve_callchain(machine, evsel, al->thread, sample, 
-	      				   &parent);
-	}
-
-	he = __hists__add_entry(&evsel->hists, al, NULL, 1);
-	if (he == NULL)
-		return -ENOMEM;
 
 	callchain_cursor_commit(&callchain_cursor);
 	callee = callchain_cursor_current(&callchain_cursor);
+
+	if(!callee)
+	  return;
 
 	while (true) {
 	  	callchain_cursor_advance(&callchain_cursor);
@@ -125,6 +115,26 @@ int cg_cnv_sample(struct perf_evsel *evsel, struct perf_sample *sample,
 
 		callee = caller;
 	}
+}
+
+int cg_cnv_sample(struct perf_evsel *evsel, struct perf_sample *sample,
+		  struct addr_location *al, struct machine *machine,
+		  struct rb_root *graph_root)
+{
+  	struct symbol *parent = NULL;
+	struct hist_entry *he;
+	int ret = 0;
+
+	if (sample->callchain) {
+	  ret = machine__resolve_callchain(machine, evsel, al->thread, sample, 
+	      				   &parent);
+	}
+
+	he = __hists__add_entry(&evsel->hists, al, NULL, 1);
+	if (he == NULL)
+		return -ENOMEM;
+
+	add_callchain_to_callgraph(evsel, graph_root);
 
 	ret = 0;
 	if (he->ms.sym != NULL) {
@@ -135,7 +145,6 @@ int cg_cnv_sample(struct perf_evsel *evsel, struct perf_sample *sample,
 		ret = hist_entry__inc_addr_samples(he, evsel->idx, al->addr);
 	}
 
-	evsel->hists.stats.total_period += sample->period;
 	hists__inc_nr_events(&evsel->hists, PERF_RECORD_SAMPLE);
 	return ret;
 }
@@ -144,23 +153,12 @@ static void cg_sym_header_printf(FILE *output, struct symbol *sym,
 				 struct map *map, struct annotation *notes,
 				 u64 offset)
 {
-	int idx, ret, ret_callee, ret_caller = 0;
+	int idx, ret_callee;
 	u64 address = map__rip_2objdump(map, sym->start) + offset;
-	unsigned caller_line;
-	const char *caller_name;
-
 	ret_callee = addr2line(address, &last_source_name, &last_line);
-	while ((ret = addr2line_inline(&caller_name, &caller_line)))
-		ret_caller = ret;
-
-	/* Needed to display correctly the inlining relationship in kcachegrind *
-	if (ret_caller && caller_line)
-		fprintf(output, "fl=%s\n0 0\n", caller_name);*/
 
 	if (ret_callee && last_line)
 		fprintf(output, "fl=%s\n", last_source_name);
-	/*else*/
-		/*fprintf(output, "fl=\n");*/
 
 	fprintf(output, "%#" PRIx64 " %u", address, last_line);
 	for (idx = 0; idx < notes->src->nr_histograms; idx++)
@@ -179,7 +177,6 @@ static void cg_sym_events_printf(FILE *output, struct symbol *sym,
 	unsigned line;
 	const char *filename;
 
-	//TODO: handle inlining like in cg_sym_header
 	ret = addr2line(map__rip_2objdump(map, sym->start) + offset,
 			&filename, &line);
 	if (filename && last_source_name && strcmp(filename, last_source_name)) {
@@ -231,7 +228,7 @@ void cg_cnv_unresolved(FILE *output, int evidx, struct hist_entry *he)
 	int idx;
 
 	fprintf(output, "ob=%s\n", he->ms.map->dso->long_name);
-	/*fprintf(output, "fn=%#" PRIx64 "\n", he->ip);*/
+	fprintf(output, "fl=\n");
 	fprintf(output, "fn=\n");
 
 	fprintf(output, "0 0");
@@ -251,11 +248,13 @@ int cg_cnv_symbol(FILE *output, struct symbol *sym, struct map *map)
 	fprintf(output, "ob=%s\n", filename);
 
 	if (addr2line_init(map->dso->long_name)) {
+	  	fprintf(output, "fl=\n");
 		fprintf(output, "fn=%s\n", sym->name);
 		cg_sym_total_printf(output, notes);
 		return -EINVAL;
 	}
 
+	/* kcachegrind wants the fl declaration before the fn one */
 	if(addr2line(map__rip_2objdump(map, sym->start), &filename, &line)){
 		fprintf(output, "fl=%s\n", filename);
 	}else
@@ -294,7 +293,7 @@ void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node){
 	if (node->sym) {
 		fprintf(output, "ob=%s\n", node->map->dso->long_name);
 
-	 	if(!addr2line_init(node->map->dso->long_name)){
+	 	if (!addr2line_init(node->map->dso->long_name)){
 			addr2line(map__rip_2objdump(node->map, node->sym->start), &filename, &line);
 			fprintf(output, "fl=%s\n", filename ? filename : "");
 			addr2line_cleanup();
@@ -302,18 +301,15 @@ void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node){
 			fprintf(output, "fl=\n");
 		}
 
-		// Function name needs to be printed out after ob and fl, otherwise kcachegrind 
-		// doesn't display the callchains correctly
 		fprintf(output, "fn=%s\n", node->sym->name);
 	}else{
 		fprintf(output, "ob=%s\n", node->map ? node->map->dso->long_name : "");
 		fprintf(output, "fl=\n");
-		/*fprintf(output, "fn=%#" PRIx64 "\n", node->address);*/
 		fprintf(output, "fn=\n");
 	}
 
 
-	list_for_each_entry(callee, &node->callees.list, list){
+	list_for_each_entry(callee, &node->callees, list){
 		if(callee->sym){
 			fprintf(output, "cob=%s\n", callee->map->dso->long_name);
 			if (!addr2line_init(callee->map->dso->long_name)){
@@ -327,11 +323,9 @@ void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node){
 				addr2line_cleanup();
 			}
 			fprintf(output, "cfn=%s\n", callee->sym->name);
-
 		}else{
 			fprintf(output, "cob=%s\n", callee->map ? callee->map->dso->long_name : "");
 			fprintf(output, "cfl=\n");
-			/*fprintf(output, "cfn=%#" PRIx64 "\n", callee->address);*/
 			fprintf(output, "cfn=\n");
 		
 		}
