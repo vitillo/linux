@@ -94,7 +94,7 @@ find_next:
 			continue;
 		}
 
-		cg_cnv_symbol(cnv->output_file, he->ms.sym, he->ms.map);
+		cg_cnv_symbol(cnv->output_file, he->ms.sym, he->ms.map, &cnv->graph_root);
 
 		free(notes->src);
 		notes->src = NULL;
@@ -142,7 +142,7 @@ static int __cmd_convert(struct perf_convert *cnv)
 		}
 	}
 
-	cg_cnv_callgraph(cnv->output_file, cnv->graph_root.rb_node);
+	cg_cnv_callgraph(cnv->output_file, &cnv->graph_root, cnv->graph_root.rb_node);
 
 	if (total_nr_samples == 0) {
 		ui__error("The %s file has no samples!\n", session->filename);

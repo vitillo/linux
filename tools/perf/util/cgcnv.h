@@ -20,6 +20,7 @@ struct callee_list {
 
 struct graph_node {
   u64 address;
+  const char *filename;
   struct rb_node rb_node;
   struct map *map;
   struct symbol *sym;
@@ -32,8 +33,8 @@ int cg_cnv_sample(struct perf_evsel *evsel, struct perf_sample *sample,
 		  struct addr_location *al, struct machine *machine,
 		  struct rb_root *graph_root);
 void cg_cnv_unresolved(FILE *output, int evidx, struct hist_entry *he);
-int cg_cnv_symbol(FILE *output, struct symbol *sym, struct map *map);
-void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node);
+int cg_cnv_symbol(FILE *output, struct symbol *sym, struct map *map, struct rb_root *graph_root);
+void cg_cnv_callgraph(FILE *output, struct rb_root *graph_root, struct rb_node *rb_node);
 
 #endif
 

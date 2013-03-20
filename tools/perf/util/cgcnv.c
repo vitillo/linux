@@ -39,7 +39,8 @@ int cg_cnv_header(FILE *output, struct perf_session *session)
 }
 
 static struct graph_node *get_graph_node(struct rb_root *root, struct map *map,
-    					 struct symbol *sym, u64 ip)
+    					 struct symbol *sym, u64 ip, 
+					 const char *filename, bool insert)
 {
 	struct rb_node **rb_node = &root->rb_node, *parent = NULL;
 	struct graph_node *node;
@@ -54,14 +55,21 @@ static struct graph_node *get_graph_node(struct rb_root *root, struct map *map,
 		else if (address > node->address)
 		  	rb_node = &(*rb_node)->rb_right;
 		else{
+			if(filename)
+				node->filename = filename;
+
 		  	return node;
 		}
 	}
+
+	if(!insert)
+		return NULL;
 
 	node = malloc(sizeof(struct graph_node));
 	node->map = map;
 	node->sym = sym;
 	node->address = address;
+	node->filename = filename;
 	INIT_LIST_HEAD(&node->callees);
 
 	rb_link_node(&node->rb_node, parent, rb_node);
@@ -109,7 +117,7 @@ static void add_callchain_to_callgraph(struct perf_evsel *evsel,
 		  break;
 
 		node = get_graph_node(graph_root, caller->map, caller->sym,
-		    		      caller->ip);
+		    		      caller->ip, NULL, true);
 		graph_node__add_callee(node, callee->map, callee->sym,
 		    		       callee->ip, evsel->idx);
 
@@ -238,7 +246,7 @@ void cg_cnv_unresolved(FILE *output, int evidx, struct hist_entry *he)
 	fprintf(output, "\n");
 }
 
-int cg_cnv_symbol(FILE *output, struct symbol *sym, struct map *map)
+int cg_cnv_symbol(FILE *output, struct symbol *sym, struct map *map, struct rb_root *graph_root)
 {
 	const char *filename = map->dso->long_name;
 	struct annotation *notes = symbol__annotation(sym);
@@ -257,10 +265,14 @@ int cg_cnv_symbol(FILE *output, struct symbol *sym, struct map *map)
 	/* kcachegrind wants the fl declaration before the fn one */
 	if(addr2line(map__rip_2objdump(map, sym->start), &filename, &line)){
 		fprintf(output, "fl=%s\n", filename);
-	}else
+	}else{
 	  	fprintf(output, "fl=\n");
+	}
 
 	fprintf(output, "fn=%s\n", sym->name);
+
+	/* Cache fl to speedup the callgraph generation */
+	get_graph_node(graph_root, map, sym, 0, strdup(filename ? filename : ""), true);
 
 	for (i = 0; i < sym_len; i++) {
 		if (cg_check_events(notes, i)) {
@@ -279,7 +291,7 @@ int cg_cnv_symbol(FILE *output, struct symbol *sym, struct map *map)
 	return 0;
 }
 
-void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node){
+void cg_cnv_callgraph(FILE *output, struct rb_root *graph_root, struct rb_node *rb_node){
 	struct graph_node *node;
 	struct callee_list *callee;
 	const char *filename;
@@ -293,13 +305,14 @@ void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node){
 	if (node->sym) {
 		fprintf(output, "ob=%s\n", node->map->dso->long_name);
 
-	 	if (!addr2line_init(node->map->dso->long_name)){
+	 	/*if (!addr2line_init(node->map->dso->long_name)){
 			addr2line(map__rip_2objdump(node->map, node->sym->start), &filename, &line);
 			fprintf(output, "fl=%s\n", filename ? filename : "");
 			addr2line_cleanup();
 		}else{
 			fprintf(output, "fl=\n");
-		}
+		}*/
+		fprintf(output, "fl=%s\n", node->filename);
 
 		fprintf(output, "fn=%s\n", node->sym->name);
 	}else{
@@ -311,8 +324,15 @@ void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node){
 
 	list_for_each_entry(callee, &node->callees, list){
 		if(callee->sym){
+			struct graph_node *tmp;
+
 			fprintf(output, "cob=%s\n", callee->map->dso->long_name);
-			if (!addr2line_init(callee->map->dso->long_name)){
+
+			tmp = get_graph_node(graph_root, callee->map, callee->sym, 0, NULL, false);
+			
+			if(tmp)
+				fprintf(output, "cfl=%s\n", tmp->filename);
+			else if (!addr2line_init(callee->map->dso->long_name)){
 				addr2line(map__rip_2objdump(callee->map, callee->sym->start),
 							    &filename, &line);
 				if (filename)
@@ -321,7 +341,9 @@ void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node){
 				  	fprintf(output, "cfl=\n");
 
 				addr2line_cleanup();
-			}
+			}else
+				fprintf(output, "cfl=\n");
+
 			fprintf(output, "cfn=%s\n", callee->sym->name);
 		}else{
 			fprintf(output, "cob=%s\n", callee->map ? callee->map->dso->long_name : "");
@@ -341,6 +363,6 @@ void cg_cnv_callgraph(FILE *output, struct rb_node *rb_node){
 		fprintf(output, "\n");
 	}
 
-	cg_cnv_callgraph(output, rb_node->rb_left);
-	cg_cnv_callgraph(output, rb_node->rb_right);
+	cg_cnv_callgraph(output, graph_root, rb_node->rb_left);
+	cg_cnv_callgraph(output, graph_root, rb_node->rb_right);
 }
