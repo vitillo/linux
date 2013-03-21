@@ -56,7 +56,7 @@ static struct graph_node *add_graph_node(struct rb_root *root, struct map *map,
 	node->sym = sym;
 	node->address = address;
 	node->filename = "";
-	INIT_LIST_HEAD(&node->callees);
+	node->callees = RB_ROOT;
 
 	rb_link_node(&node->rb_node, parent, rb_node);
 	rb_insert_color(&node->rb_node, root);
@@ -83,28 +83,41 @@ static struct graph_node *get_graph_node(struct rb_root *root, u64 address)
 	return NULL;
 }
 
-static void graph_node__add_callee(struct graph_node *node, struct map *map,
-    				   struct symbol *sym, u64 ip, int idx){
-  	struct callee_list *callee;
+static void graph_node__add_callee(struct graph_node *caller, struct map *map,
+    				   struct symbol *sym, u64 ip, int idx)
+{
+	struct rb_node **rb_node = &caller->callees.rb_node, *parent = NULL;
+	struct  callee_node *callee;
 	u64 address = sym ? sym->start : map ? map->start : ip;
 
-	list_for_each_entry(callee, &node->callees, list)
-	 	if (callee->address == address)
-		  	goto incr;
+	while (*rb_node){
+	  	parent = *rb_node;
+		callee = rb_entry(parent, struct callee_node, rb_node);
+
+		if (address < callee->address)
+		 	rb_node = &(*rb_node)->rb_left;
+		else if (address > callee->address)
+		  	rb_node = &(*rb_node)->rb_right;
+		else{
+			callee->hits[idx]++;
+			return;
+		}
+	}
 
 	callee = calloc(1, sizeof(*callee) + nr_events *
 			sizeof(callee->hits[0]));
 	callee->map = map;
 	callee->sym = sym;
 	callee->address = address;
-	list_add(&callee->list, &node->callees);
+	callee->hits[idx] = 1;
 
-incr:
-	callee->hits[idx]++;
+	rb_link_node(&callee->rb_node, parent, rb_node);
+	rb_insert_color(&callee->rb_node, &caller->callees);
 }
 
 static void add_callchain_to_callgraph(struct perf_evsel *evsel,
-    				       struct rb_root *graph_root){
+    				       struct rb_root *graph_root)
+{
 	struct callchain_cursor_node *caller, *callee;
 	struct graph_node *node;
 
@@ -230,6 +243,15 @@ static inline bool cg_check_events(struct annotation *notes, u64 offset)
 static void cg_sym_total_printf(FILE *output, struct annotation *notes)
 {
 	int idx;
+	bool printable = false;
+
+	for (idx = 0; idx < notes->src->nr_histograms; idx++){
+		if(annotation__histogram(notes, idx)->sum)
+		  	printable = true;
+	}
+
+	if (!printable)
+	  return;
 
 	fprintf(output, "0 0");
 	for (idx = 0; idx < notes->src->nr_histograms; idx++) {
@@ -242,12 +264,20 @@ static void cg_sym_total_printf(FILE *output, struct annotation *notes)
 static void cg_cnv_unresolved(FILE *output, struct graph_node *node)
 {
 	unsigned idx;
+	bool printable = false;
+
+	for (idx = 0; idx < nr_events; idx++){
+	 	if(node->hits[idx])
+		  printable = true;
+	}
+
+	if(!printable)
+	 	return;
 
 	fprintf(output, "ob=%s\n", node->map ? node->map->dso->long_name : "");
 	fprintf(output, "fl=\n");
 	fprintf(output, "fn=\n");
 
-	fprintf(output, "0 0");
 	for (idx = 0; idx < nr_events; idx++)
 		fprintf(output, " %" PRIu64, node->hits[idx]);
 	fprintf(output, "\n");
@@ -320,11 +350,46 @@ static void scan_callgraph(FILE *output, struct rb_node *rb_node){
 	scan_callgraph(output, rb_node->rb_right);
 }
 
+static void dump_callee(FILE *output, struct rb_node *rb_node, struct rb_root *graph_root)
+{
+  	struct graph_node *callee_node;
+ 	struct callee_node *callee;
+	unsigned i;
+
+	if(!rb_node)
+	  return;
+
+ 	callee = rb_entry(rb_node, struct callee_node, rb_node);
+	dump_callee(output, rb_node->rb_left, graph_root);
+
+	if(callee->sym){
+		fprintf(output, "cob=%s\n", callee->map->dso->long_name);
+		callee_node = get_graph_node(graph_root, callee->address);
+		fprintf(output, "cfl=%s\n", callee_node->filename);
+		fprintf(output, "cfn=%s\n", callee->sym->name);
+	}else{
+		fprintf(output, "cob=%s\n", callee->map ? 
+			callee->map->dso->long_name : "");
+		fprintf(output, "cfl=\n");
+		fprintf(output, "cfn=\n");
+	}
+
+	fprintf(output, "calls=");
+	for (i = 0; i < nr_events; i++)
+		fprintf(output, "%" PRIu64 " ", callee->hits[i]);
+
+	fprintf(output, "\n0 0 ");
+	for (i = 0; i < nr_events; i++)
+		fprintf(output, "%" PRIu64 " ", callee->hits[i]);
+
+	fprintf(output, "\n");
+
+	dump_callee(output, rb_node->rb_right, graph_root);
+}
+
 static void dump_callgraph(FILE *output, struct rb_root *graph_root,
 			   struct rb_node *rb_node){
-	struct graph_node *node, *callee_node;
-	struct callee_list *callee;
-	unsigned i;
+	struct graph_node *node;
 
   	if(!rb_node)
 	  return;
@@ -336,12 +401,15 @@ static void dump_callgraph(FILE *output, struct rb_root *graph_root,
 		fprintf(output, "fl=%s\n", node->filename);
 		fprintf(output, "fn=%s\n", node->sym->name);
 	}else{
-		fprintf(output, "ob=%s\n", node->map ? node->map->dso->long_name : "");
+		fprintf(output, "ob=%s\n", node->map ? node->map->dso->long_name
+						     : "");
 		fprintf(output, "fl=\n");
 		fprintf(output, "fn=\n");
 	}
 
-	list_for_each_entry(callee, &node->callees, list){
+	dump_callee(output, node->callees.rb_node, graph_root);
+
+	/*list_for_each_entry(callee, &node->callees, list){
 		if(callee->sym){
 			fprintf(output, "cob=%s\n", callee->map->dso->long_name);
 			callee_node = get_graph_node(graph_root, callee->address);
@@ -364,7 +432,7 @@ static void dump_callgraph(FILE *output, struct rb_root *graph_root,
 			fprintf(output, "%" PRIu64 " ", callee->hits[i]);
 
 		fprintf(output, "\n");
-	}
+	}*/
 
 	dump_callgraph(output, graph_root, rb_node->rb_left);
 	dump_callgraph(output, graph_root, rb_node->rb_right);
