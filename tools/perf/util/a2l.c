@@ -127,15 +127,15 @@ void addr2line_cleanup(void)
 
 int addr2line_inline(const char **file, unsigned *line_nr)
 {
-
 	found = bfd_find_inliner_info(abfd, &filename, &functionname, &line);
 
-	if (found){
+	if (found && filename){
 		*file = filename;
 		*line_nr = line;
+		return found;
 	}
 
-	return found;
+	return 0;
 }
 
 int addr2line(unsigned long addr, const char **file, unsigned *line_nr)
@@ -144,10 +144,11 @@ int addr2line(unsigned long addr, const char **file, unsigned *line_nr)
 	pc = addr;
 	bfd_map_over_sections(abfd, find_address_in_section, NULL);
 
-	if (found) {
+	if (found && filename) {
 		*file = filename;
 		*line_nr = line;
+		return found;
 	}
 
-	return found;
+	return 0;
 }

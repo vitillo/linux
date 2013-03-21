@@ -191,7 +191,7 @@ static void cg_sym_events_printf(FILE *output, struct symbol *sym,
 {
 	int ret, idx;
 	unsigned line;
-	const char *filename;
+	const char *filename = NULL;
 
 	ret = addr2line(map__rip_2objdump(map, sym->start) + offset,
 			&filename, &line);
@@ -253,7 +253,7 @@ static void cg_cnv_unresolved(FILE *output, struct graph_node *node)
 	fprintf(output, "\n");
 }
 
-static int cg_cnv_symbol(FILE *output, struct graph_node *node)
+static void cg_cnv_symbol(FILE *output, struct graph_node *node)
 {
 	struct annotation *notes;
 	struct map *map = node->map;
@@ -264,7 +264,7 @@ static int cg_cnv_symbol(FILE *output, struct graph_node *node)
 	
 	if(!map || !sym){
 		cg_cnv_unresolved(output, node);
-		return -1;
+		return;
 	}
 	
 	dso_name = map->dso->long_name;
@@ -273,13 +273,13 @@ static int cg_cnv_symbol(FILE *output, struct graph_node *node)
 
 	if (addr2line_init(map->dso->long_name)) {
 		if(!notes->src) // No samples
-			return -1;
+			return;
 
 		fprintf(output, "ob=%s\n", dso_name);
 	  	fprintf(output, "fl=\n");
 		fprintf(output, "fn=%s\n", sym->name);
 		cg_sym_total_printf(output, notes);
-		return -EINVAL;
+		return;
 	}
 
 	addr2line(map__rip_2objdump(map, sym->start), &filename, &line);
@@ -288,15 +288,12 @@ static int cg_cnv_symbol(FILE *output, struct graph_node *node)
 	node->filename = strdup(filename);
 		
 	if(!notes->src)
-		return -1;
+		return;
 	
 	/* KCachegrind wants the fl declaration before the fn one */
 	fprintf(output, "ob=%s\n", dso_name);
 	fprintf(output, "fl=%s\n", filename);
 	fprintf(output, "fn=%s\n", sym->name);
-
-	/* Cache filename to speedup the callgraph generation */
-	node->filename = strdup(filename ? filename : "");
 
 	for (i = 0; i < sym_len; i++) {
 		if (cg_check_events(notes, i)) {
@@ -309,8 +306,6 @@ static int cg_cnv_symbol(FILE *output, struct graph_node *node)
 		if (cg_check_events(notes, i))
 			cg_sym_events_printf(output, sym, map, notes, i);
 	}
-
-	return 0;
 }
 
 static void scan_callgraph(FILE *output, struct rb_node *rb_node){
