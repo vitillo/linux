@@ -3,17 +3,19 @@ perf-convert(1)
 
 NAME
 ----
-perf-convert - Convert perf.data (created by perf record) to a callgrind data file.
+perf-convert - Convert perf.data (created by perf record) to a set of callgrind 
+data files.
 
 SYNOPSIS
 --------
 [verse]
-'perf convert' [-i <file> | --input=file] [-o <file> | --output=file]
+'perf convert' [-i <file> | --input=file] [-p <name> | --prefix=name]
 
 DESCRIPTION
 -----------
-This command converts the input file to a callgrind data file which can be 
-subsequently displayed with kcachegrind.
+This command converts the input file to a set of callgrind data files which can 
+be subsequently displayed with kcachegrind. A distinct callgrind data file is 
+generated for each recorded event. 
 
 OPTIONS
 -------
@@ -21,9 +23,9 @@ OPTIONS
 --input=::
         Input file name. (default: perf.data unless stdin is a fifo)
 
--o::
---output=::
-        Output file name. (default: callgrind.out)
+-p::
+--prefix=::
+        Filename prefix of the generated callgrind files. (default: callgrind_)
 
 -d::
 --dsos=<dso[,dso...]>::

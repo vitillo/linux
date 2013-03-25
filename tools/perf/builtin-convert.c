@@ -499,7 +499,7 @@ static int __cmd_convert(struct perf_convert *cnv)
 	list_for_each_entry(pos, &session->evlist->entries, node) {
 		const char *evname = perf_evsel__name(pos);
 
-		snprintf(output_filename, sizeof(output_filename), "%s_%s",
+		snprintf(output_filename, sizeof(output_filename), "%s%s",
 			 cnv->output_prefix, evname);
 		output_files[i] = fopen(output_filename, "w");
 
@@ -551,13 +551,13 @@ int cmd_convert(int argc, const char **argv, const char *prefix __maybe_unused)
 			.ordered_samples = true,
 			.ordering_requires_timestamps = true,
 		},
-		.output_prefix = "callgrind"
+		.output_prefix = "callgrind_"
 	};
 	const struct option options[] = {
 	OPT_STRING('i', "input", &convert.input_name, "file",
 		    "input file name"),
-	OPT_STRING('o', "output", &convert.output_prefix, "output", "output "
-		   "filename prefix, default is callgrind"),
+	OPT_STRING('p', "prefix", &convert.output_prefix, "prefix", "filename "
+		   "prefix of the generated callgrind files, default is 'callgrind_'"),
 	OPT_STRING('d', "dsos", &symbol_conf.dso_list_str, "dso[,dso...]",
 		   "only consider symbols in these dsos"),
 	OPT_BOOLEAN('f', "force", &convert.force, "don't complain, do it"),
