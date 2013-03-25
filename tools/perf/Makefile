@@ -808,16 +808,19 @@ else
 		has_bfd := $(call try-cc,$(SOURCE_BFD),$(FLAGS_BFD),libbfd)
 		ifeq ($(has_bfd),y)
 			EXTLIBS += -lbfd
+			bfd_available = y
 		else
 			FLAGS_BFD_IBERTY=$(FLAGS_BFD) -liberty
 			has_bfd_iberty := $(call try-cc,$(SOURCE_BFD),$(FLAGS_BFD_IBERTY),liberty)
 			ifeq ($(has_bfd_iberty),y)
 				EXTLIBS += -lbfd -liberty
+				bfd_available = y
 			else
 				FLAGS_BFD_IBERTY_Z=$(FLAGS_BFD_IBERTY) -lz
 				has_bfd_iberty_z := $(call try-cc,$(SOURCE_BFD),$(FLAGS_BFD_IBERTY_Z),libz)
 				ifeq ($(has_bfd_iberty_z),y)
 					EXTLIBS += -lbfd -liberty -lz
+					bfd_available = y
 				else
 					FLAGS_CPLUS_DEMANGLE=$(ALL_CFLAGS) $(ALL_LDFLAGS) $(EXTLIBS) -liberty
 					has_cplus_demangle := $(call try-cc,$(SOURCE_CPLUS_DEMANGLE),$(FLAGS_CPLUS_DEMANGLE),demangle)
@@ -832,6 +835,16 @@ else
 			endif
 		endif
 	endif
+endif
+
+ifeq ($(bfd_available),y)
+	EXTLIBS += -lbfd -liberty -lz
+	LIB_H += util/a2l.h
+	LIB_OBJS += $(OUTPUT)util/a2l.o
+	BUILTIN_OBJS += $(OUTPUT)builtin-convert.o
+	BASIC_CFLAGS += -DLIBBFD_SUPPORT
+else
+	msg := $(warning No bfd.h/libbfd found, install binutils-dev[el]/zlib-static to enable the convert tool)
 endif
 
 ifeq ($(NO_PERF_REGS),0)
