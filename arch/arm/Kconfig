@@ -77,6 +77,27 @@ config ARM_DMA_USE_IOMMU
 	select ARM_HAS_SG_CHAIN
 	select NEED_SG_DMA_LENGTH
 
+if ARM_DMA_USE_IOMMU
+
+config ARM_DMA_IOMMU_ALIGNMENT
+	int "Maximum PAGE_SIZE order of alignment for DMA IOMMU buffers"
+	range 4 9
+	default 8
+	help
+	  DMA mapping framework by default aligns all buffers to the smallest
+	  PAGE_SIZE order which is greater than or equal to the requested buffer
+	  size. This works well for buffers up to a few hundreds kilobytes, but
+	  for larger buffers it just a waste of address space. Drivers which has
+	  relatively small addressing window (like 64Mib) might run out of
+	  virtual space with just a few allocations.
+
+	  With this parameter you can specify the maximum PAGE_SIZE order for
+	  DMA IOMMU buffers. Larger buffers will be aligned only to this
+	  specified order. The order is expressed as a power of two multiplied
+	  by the PAGE_SIZE.
+
+endif
+
 config HAVE_PWM
 	bool
 
@@ -534,7 +555,6 @@ config ARCH_IXP4XX
 config ARCH_DOVE
 	bool "Marvell Dove"
 	select ARCH_REQUIRE_GPIOLIB
-	select COMMON_CLK_DOVE
 	select CPU_V7
 	select GENERIC_CLOCKEVENTS
 	select MIGHT_HAVE_PCI
@@ -722,6 +742,7 @@ config ARCH_RPC
 	select NEED_MACH_IO_H
 	select NEED_MACH_MEMORY_H
 	select NO_IOPORT
+	select VIRT_TO_BUS
 	help
 	  On the Acorn Risc-PC, Linux can support the internal IDE disk and
 	  CD-ROM interface, serial and parallel port, and the floppy drive.
@@ -857,6 +878,7 @@ config ARCH_SHARK
 	select ISA_DMA
 	select NEED_MACH_MEMORY_H
 	select PCI
+	select VIRT_TO_BUS
 	select ZONE_DMA
 	help
 	  Support for the StrongARM based Digital DNARD machine, also known
@@ -984,12 +1006,12 @@ config ARCH_MULTI_V4_V5
 	bool
 
 config ARCH_MULTI_V6
-	bool "ARMv6 based platforms (ARM11, Scorpion, ...)"
+	bool "ARMv6 based platforms (ARM11)"
 	select ARCH_MULTI_V6_V7
 	select CPU_V6
 
 config ARCH_MULTI_V7
-	bool "ARMv7 based platforms (Cortex-A, PJ4, Krait)"
+	bool "ARMv7 based platforms (Cortex-A, PJ4, Scorpion, Krait)"
 	default y
 	select ARCH_MULTI_V6_V7
 	select ARCH_VEXPRESS
@@ -1440,10 +1462,6 @@ config ISA_DMA
 	bool
 	select ISA_DMA_API
 
-config ARCH_NO_VIRT_TO_BUS
-	def_bool y
-	depends on !ARCH_RPC && !ARCH_NETWINDER && !ARCH_SHARK
-
 # Select ISA DMA interface
 config ISA_DMA_API
 	bool
@@ -1635,13 +1653,16 @@ config LOCAL_TIMERS
 	  accounting to be spread across the timer interval, preventing a
 	  "thundering herd" at every timer tick.
 
+# The GPIO number here must be sorted by descending number. In case of
+# a multiplatform kernel, we just want the highest value required by the
+# selected platforms.
 config ARCH_NR_GPIO
 	int
 	default 1024 if ARCH_SHMOBILE || ARCH_TEGRA
-	default 355 if ARCH_U8500
-	default 264 if MACH_H4700
 	default 512 if SOC_OMAP5
+	default 355 if ARCH_U8500
 	default 288 if ARCH_VT8500 || ARCH_SUNXI
+	default 264 if MACH_H4700
 	default 0
 	help
 	  Maximum number of GPIOs in the system.
@@ -1654,7 +1675,6 @@ config HZ
 	int
 	default 200 if ARCH_EBSA110 || ARCH_S3C24XX || ARCH_S5P64X0 || \
 		ARCH_S5PV210 || ARCH_EXYNOS4
-	default OMAP_32K_TIMER_HZ if ARCH_OMAP && OMAP_32K_TIMER
 	default AT91_TIMER_HZ if ARCH_AT91
 	default SHMOBILE_TIMER_HZ if ARCH_SHMOBILE
 	default 100
@@ -1866,8 +1886,9 @@ config XEN_DOM0
 
 config XEN
 	bool "Xen guest support on ARM (EXPERIMENTAL)"
-	depends on ARM && OF
+	depends on ARM && AEABI && OF
 	depends on CPU_V7 && !CPU_V6
+	depends on !GENERIC_ATOMIC64
 	help
 	  Say Y if you want to run Linux in a Virtual Machine on Xen on ARM.
 
