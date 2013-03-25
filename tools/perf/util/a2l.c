@@ -67,12 +67,12 @@ static int slurp_symtab(void)
 	return 0;
 }
 
-static void find_address_in_section(bfd *bfd, asection *section,
+static void find_address_in_section(bfd *mybfd, asection *section,
 				    void *data ATTRIBUTE_UNUSED)
 {
 	bfd_vma vma;
 	bfd_size_type size;
-	(void)bfd;
+	(void)mybfd;
 
 	if (found)
 		return;
