@@ -2,21 +2,16 @@
  * builtin-convert.c
  *
  * Builtin convert command: Convert a perf.data input file
- * to a callgrind profile data file.
+ * to a set of callgrind profile data files.
  */
 
-#include "builtin.h"
+#include <linux/list.h>
+#include <linux/rbtree.h>
+#include <linux/bitmap.h>
 
 #include "util/util.h"
-#include "util/color.h"
-#include <linux/list.h>
 #include "util/cache.h"
-#include <linux/rbtree.h>
 #include "util/symbol.h"
-
-#include "perf.h"
-#include "util/debug.h"
-
 #include "util/evlist.h"
 #include "util/evsel.h"
 #include "util/annotate.h"
@@ -24,80 +19,89 @@
 #include "util/parse-options.h"
 #include "util/parse-events.h"
 #include "util/thread.h"
-#include "util/hist.h"
 #include "util/session.h"
 #include "util/tool.h"
 #include "util/a2l.h"
 
-#include <linux/bitmap.h>
+#include "builtin.h"
+#include "perf.h"
 
 struct perf_convert {
 	struct perf_tool tool;
 	char const *input_name;
-	char const *output_name;
+	char const *output_prefix;
 	bool	   force;
 	const char *cpu_list;
 	DECLARE_BITMAP(cpu_bitmap, MAX_NR_CPUS);
 };
 
-struct callee_node {
-  struct rb_node rb_node;
-  struct map *map;
-  struct symbol *sym;
-  u64 address;
-  u64 hits[0];
-};
-
-struct stats{
+struct stats {
 	u64 hits;
 	bool has_callees;
 };
 
 struct graph_node {
-  u64 address;
-  const char *filename;
-  struct rb_node rb_node;
-  struct map *map;
-  struct symbol *sym;
-  struct rb_root callees;
-  struct stats stats[0];
+	u64 address;
+	const char *filename;
+	struct rb_node rb_node;
+	struct map *map;
+	struct symbol *sym;
+	struct rb_root callees;
+	struct stats stats[0];
+};
+
+struct callee {
+	struct rb_node rb_node;
+	struct map *map;
+	struct symbol *sym;
+	u64 address;
+	u64 hits[0];
 };
 
 static const char *last_source_name;
+static unsigned nr_events;
 static unsigned last_line;
 static u64 last_off;
-static unsigned nr_events;
 static FILE **output_files;
 static struct rb_root graph_root;
 
-static struct graph_node *add_graph_node(struct map *map,
-					 struct symbol *sym, u64 ip)
+static struct graph_node *add_graph_node(struct map *map, struct symbol *sym,
+					 u64 ip)
 {
 	struct rb_node **rb_node = &(&graph_root)->rb_node, *parent = NULL;
 	struct graph_node *node;
-	u64 address = sym ? sym->start : map ? map->start : ip;
+	u64 address;
 
-	while (*rb_node){
-	  	parent = *rb_node;
+	if (sym)
+		address = map->start + sym->start;
+	else if (map)
+		address = map->start;
+	else
+		address = ip;
+
+	while (*rb_node) {
+		parent = *rb_node;
 		node = rb_entry(parent, struct graph_node, rb_node);
 
 		if (address < node->address)
-		 	rb_node = &(*rb_node)->rb_left;
+			rb_node = &(*rb_node)->rb_left;
 		else if (address > node->address)
-		  	rb_node = &(*rb_node)->rb_right;
+			rb_node = &(*rb_node)->rb_right;
 		else
-		  	return node;
+			return node;
 	}
 
-	node = calloc(1, sizeof(*node) + nr_events * sizeof(node->stats[0]));
-	node->map = map;
-	node->sym = sym;
-	node->address = address;
-	node->filename = "";
-	node->callees = RB_ROOT;
+	node = zalloc(sizeof(*node) + nr_events * sizeof(node->stats[0]));
+	if (node) {
+		node->map = map;
+		node->sym = sym;
+		node->address = address;
+		node->filename = "";
+		node->callees = RB_ROOT;
 
-	rb_link_node(&node->rb_node, parent, rb_node);
-	rb_insert_color(&node->rb_node, &graph_root);
+		rb_link_node(&node->rb_node, parent, rb_node);
+		rb_insert_color(&node->rb_node, &graph_root);
+	}
 
 	return node;
 }
@@ -107,85 +111,107 @@ static struct graph_node *get_graph_node(u64 address)
 	struct rb_node *rb_node = (&graph_root)->rb_node;
 	struct graph_node *node;
 
-	while (rb_node){
+	while (rb_node) {
 		node = rb_entry(rb_node, struct graph_node, rb_node);
 
 		if (address < node->address)
-		 	rb_node = rb_node->rb_left;
+			rb_node = rb_node->rb_left;
 		else if (address > node->address)
-		  	rb_node = rb_node->rb_right;
+			rb_node = rb_node->rb_right;
 		else
-		  	return node;
+			return node;
 	}
 
 	return NULL;
 }
 
-static void graph_node__add_callee(struct graph_node *caller, struct map *map,
-    				   struct symbol *sym, u64 ip, int idx)
+static int graph_node__add_callee(struct graph_node *caller, struct map *map,
+				  struct symbol *sym, u64 ip, int idx)
 {
 	struct rb_node **rb_node = &caller->callees.rb_node, *parent = NULL;
-	struct  callee_node *callee;
-	u64 address = sym ? sym->start : map ? map->start : ip;
+	struct callee *callee;
+	u64 address;
 
-	while (*rb_node){
-	  	parent = *rb_node;
-		callee = rb_entry(parent, struct callee_node, rb_node);
+	if (sym)
+		address = map->start + sym->start;
+	else if (map)
+		address = map->start;
+	else
+		address = ip;
+
+
+	while (*rb_node) {
+		parent = *rb_node;
+		callee = rb_entry(parent, struct callee, rb_node);
 
 		if (address < callee->address)
-		 	rb_node = &(*rb_node)->rb_left;
+			rb_node = &(*rb_node)->rb_left;
 		else if (address > callee->address)
-		  	rb_node = &(*rb_node)->rb_right;
+			rb_node = &(*rb_node)->rb_right;
 		else{
 			callee->hits[idx]++;
 			caller->stats[idx].has_callees = true;
-			return;
+
+			return 0;
 		}
 	}
 
-	callee = calloc(1, sizeof(*callee) + nr_events *
-			sizeof(callee->hits[0]));
-	callee->map = map;
-	callee->sym = sym;
-	callee->address = address;
-	callee->hits[idx] = 1;
-	caller->stats[idx].has_callees = true;
+	callee = zalloc(sizeof(*callee) + nr_events * sizeof(callee->hits[0]));
+	if (callee) {
+		callee->map = map;
+		callee->sym = sym;
+		callee->address = address;
+		callee->hits[idx] = 1;
+		caller->stats[idx].has_callees = true;
 
-	rb_link_node(&callee->rb_node, parent, rb_node);
-	rb_insert_color(&callee->rb_node, &caller->callees);
+		rb_link_node(&callee->rb_node, parent, rb_node);
+		rb_insert_color(&callee->rb_node, &caller->callees);
+
+		return 0;
+	} else
+		return -ENOMEM;
 }
 
-static void add_callchain_to_callgraph(int idx)
+static int add_callchain_to_callgraph(int idx)
 {
 	struct callchain_cursor_node *caller, *callee;
 	struct graph_node *node;
+	int err;
 
 	callchain_cursor_commit(&callchain_cursor);
 	callee = callchain_cursor_current(&callchain_cursor);
 
-	if(!callee)
-	  return;
+	if (!callee)
+		return 0;
 
 	while (true) {
-	  	callchain_cursor_advance(&callchain_cursor);
+		callchain_cursor_advance(&callchain_cursor);
 		caller = callchain_cursor_current(&callchain_cursor);
 
 		if (!caller)
-		  break;
+			break;
 
 		node = add_graph_node(caller->map, caller->sym, caller->ip);
-		graph_node__add_callee(node, callee->map, callee->sym,
-		    		       callee->ip, idx);
+		if (!node)
+			return -ENOMEM;
+
+		err = graph_node__add_callee(node, callee->map, callee->sym,
+					     callee->ip, idx);
+		if (err)
+			return err;
 
 		callee = caller;
 	}
+
+	return 0;
 }
 
-static int accumulate_sample(struct perf_evsel *evsel, struct perf_sample *sample, struct addr_location *al, struct machine *machine)
+static int accumulate_sample(struct perf_evsel *evsel, struct perf_sample *sample,
+			     struct addr_location *al, struct machine *machine)
 {
 	struct symbol *parent = NULL;
 	struct graph_node *node;
-	int err = 0;
+	int err;
 
 	if (sample->callchain) {
 		err = machine__resolve_callchain(machine, evsel, al->thread,
@@ -196,7 +222,13 @@ static int accumulate_sample(struct perf_evsel *evsel, struct perf_sample *sampl
 	}
 
 	node = add_graph_node(al->map, al->sym, al->addr);
-	add_callchain_to_callgraph(evsel->idx);
+	if (!node)
+		return -ENOMEM;
+
+	err = add_callchain_to_callgraph(evsel->idx);
+	if (err)
+		return err;
+
 	node->stats[evsel->idx].hits++;
 
 	if (node->sym != NULL) {
@@ -204,12 +236,12 @@ static int accumulate_sample(struct perf_evsel *evsel, struct perf_sample *sampl
 		if (notes->src == NULL && symbol__alloc_hist(node->sym) < 0)
 			return -ENOMEM;
 
-		err = symbol__inc_addr_samples(node->sym, node->map, evsel->idx, al->addr);
+		err = symbol__inc_addr_samples(node->sym, node->map, evsel->idx,
+					       al->addr);
 		if (err)
 			return err;
 	}
 
-	hists__inc_nr_events(&evsel->hists, PERF_RECORD_SAMPLE);
 	return 0;
 }
 
@@ -221,6 +253,7 @@ static int process_sample_event(struct perf_tool *tool,
 {
 	struct perf_convert *cnv = container_of(tool, struct perf_convert, tool);
 	struct addr_location al;
+	int err;
 
 	if (perf_event__preprocess_sample(event, machine, &al, sample,
 					  symbol__annotate_init) < 0) {
@@ -232,9 +265,12 @@ static int process_sample_event(struct perf_tool *tool,
 	if (cnv->cpu_list && !test_bit(sample->cpu, cnv->cpu_bitmap))
 		return 0;
 
-	if (!al.filtered && accumulate_sample(evsel, sample, &al, machine)) {
-		pr_warning("problem incrementing symbol count, skipping event\n");
-		return -1;
+	if (!al.filtered) {
+		err = accumulate_sample(evsel, sample, &al, machine);
+		if (err) {
+			pr_warning("problem incrementing symbol count, skipping event\n");
+			return err;
+		}
 	}
 
 	return 0;
@@ -245,13 +281,16 @@ static inline void print_header(const char *evname, int idx)
 	fprintf(output_files[idx], "positions: instr line\nevents: %s\n", evname);
 }
 
-static void print_function_header(struct graph_node *node, struct symbol *sym, struct map *map, struct annotation *notes, u64 offset, int idx)
+static void print_function_header(struct graph_node *node, u64 offset, int idx)
 {
-	int ret;
+	FILE *output = output_files[idx];
+	const char *filename;
+	struct map *map = node->map;
+	struct symbol *sym = node->sym;
+	struct annotation *notes = symbol__annotation(sym);
 	u64 function_start = map__rip_2objdump(map, sym->start);
 	u64 address = function_start + offset;
-	const char *filename;
-	FILE *output = output_files[idx];
+	int ret;
 
 	filename = "";
 	addr2line(function_start, &filename, &last_line);
@@ -263,33 +302,35 @@ static void print_function_header(struct graph_node *node, struct symbol *sym, s
 	fprintf(output, "fl=%s\n", filename);
 	fprintf(output, "fn=%s\n", sym->name);
 	fprintf(output, "0 0\n");
-	
+
 	ret = addr2line(address, &last_source_name, &last_line);
 	if (ret && strcmp(filename, last_source_name))
 		fprintf(output, "fl=%s\n", last_source_name);
 
-	fprintf(output, "%#" PRIx64 " %u", address, last_line);
-	fprintf(output, " %" PRIu64, annotation__histogram(notes, idx)->addr[offset]);
+	fprintf(output, "%#" PRIx64 " %u %" PRIu64 "\n", address, last_line,
+		annotation__histogram(notes, idx)->addr[offset]);
 
-	fprintf(output, "\n");
 	last_off = offset;
 }
 
-static inline bool events_have_samples(struct annotation *notes, u64 offset, int idx)
+static inline bool event_has_samples(struct annotation *notes, u64 offset, int idx)
 {
- 	return annotation__histogram(notes, idx)->addr[offset];
+	return annotation__histogram(notes, idx)->addr[offset];
 }
 
-static void print_function_tail(struct symbol *sym, struct map *map, struct annotation *notes, u64 offset, int idx)
+static void print_function_tail(struct graph_node *node, u64 offset, int idx)
 {
 	int ret;
 	unsigned line;
 	const char *filename = NULL;
 	FILE *output = output_files[idx];
+	struct map *map = node->map;
+	struct symbol *sym = node->sym;
+	struct annotation *notes = symbol__annotation(sym);
 
 	ret = addr2line(map__rip_2objdump(map, sym->start) + offset,
 			&filename, &line);
-	if (filename && last_source_name && strcmp(filename, last_source_name)) {
+	if (ret && strcmp(filename, last_source_name)) {
 		fprintf(output, "fl=%s\n", filename);
 		last_source_name = filename;
 	}
@@ -297,21 +338,26 @@ static void print_function_tail(struct symbol *sym, struct map *map, struct anno
 	if (ret)
 		fprintf(output, "+%" PRIu64 " %+d", offset - last_off,
 			(int)(line - last_line));
-	else
-		fprintf(output, "+%" PRIu64 " %u", offset - last_off, line);
+	else{
+		fprintf(output, "+%" PRIu64 " 0", offset - last_off);
+		line = 0;
+	}
 
-	fprintf(output, " %" PRIu64, annotation__histogram(notes, idx)->addr[offset]);
+	fprintf(output, " %" PRIu64 "\n",
+		annotation__histogram(notes, idx)->addr[offset]);
 
-	fprintf(output, "\n");
 	last_off = offset;
 	last_line = line;
 }
 
 static void print_function_summary(struct graph_node *node, int idx)
 {
-  	FILE *output = output_files[idx];
+	FILE *output = output_files[idx];
 
 	fprintf(output, "ob=%s\n", node->map ? node->map->dso->long_name : "");
+
+	/* Without the empty fl declaration kcachegrind would apply the last
+	 * valid fl declaration in the file*/
 	fprintf(output, "fl=\n");
 	fprintf(output, "fn=%s\n", node->sym ? node->sym->name : "");
 	fprintf(output, "0 0 %" PRIu64, node->stats[idx].hits);
@@ -324,94 +370,87 @@ static void print_function(struct graph_node *node, int idx)
 	struct map *map;
 	struct symbol *sym;
 	u64 sym_len, i;
-	
-	if(!node->stats[idx].hits)
-	  	return;
+
+	if (!node->stats[idx].hits)
+		return;
 
 	map = node->map;
 	sym = node->sym;
 
-	if(!map || !sym || addr2line_init(map->dso->long_name)){
+	if (!map || !sym || addr2line_init(map->dso->long_name)) {
 		print_function_summary(node, idx);
 		return;
 	}
-	
+
 	notes = symbol__annotation(sym);
 	sym_len = sym->end - sym->start;
 
 	for (i = 0; i < sym_len; i++) {
-		if (events_have_samples(notes, i, idx)) {
-			print_function_header(node, sym, map, notes, i, idx);
+		if (event_has_samples(notes, i, idx)) {
+			print_function_header(node, i, idx);
 			break;
 		}
 	}
 
 	for (++i; i < sym_len; i++) {
-		if (events_have_samples(notes, i, idx))
-			print_function_tail(sym, map, notes, i, idx);
+		if (event_has_samples(notes, i, idx))
+			print_function_tail(node, i, idx);
 	}
 }
 
 static void print_functions(void){
-  	struct rb_node *rb_node;
+	struct rb_node *rb_node;
 	struct graph_node *node;
 	u64 i = 0;
 
-	for(rb_node = rb_first(&graph_root); rb_node; rb_node = rb_next(rb_node)){
+	for (rb_node = rb_first(&graph_root); rb_node; rb_node = rb_next(rb_node)) {
 		node = rb_entry(rb_node, struct graph_node, rb_node);
 
-		for(i = 0; i < nr_events; i++)
+		for (i = 0; i < nr_events; i++)
 			print_function(node, i);
 	}
 }
 
-static void print_callee(struct callee_node *callee, int idx)
+static void print_callee(struct callee *callee, int idx)
 {
 	FILE *output = output_files[idx];
-  	struct graph_node *callee_node;
+	struct graph_node *callee_node;
 
-	if(!callee->hits[idx])
+	if (!callee->hits[idx])
 		return;
 
-	if(callee->sym){
-		fprintf(output, "cob=%s\n", callee->map->dso->long_name);
+	if (callee->sym) {
 		callee_node = get_graph_node(callee->address);
-		fprintf(output, "cfl=%s\n", callee_node->filename);
-		fprintf(output, "cfn=%s\n", callee->sym->name);
-	}else{
-		fprintf(output, "cob=%s\n", callee->map ? 
+		fprintf(output, "cob=%s\ncfl=%s\ncfn=%s\n",
+			callee->map->dso->long_name, callee_node->filename,
+			callee->sym->name);
+	} else
+		fprintf(output, "cob=%s\ncfl=\ncfn=\n", callee->map ?
 			callee->map->dso->long_name : "");
-		fprintf(output, "cfl=\n");
-		fprintf(output, "cfn=\n");
-	}
 
-	fprintf(output, "calls=%" PRIu64 "\n", callee->hits[idx]);
-	fprintf(output, "0 0 %" PRIu64 " \n", callee->hits[idx]);
+	fprintf(output, "calls=%" PRIu64 "\n0 0 %" PRIu64 "\n",
+		callee->hits[idx], callee->hits[idx]);
 
 }
 
 static void print_caller(struct graph_node *node, int idx)
 {
 	FILE *output = output_files[idx];
-	struct callee_node *callee;
+	struct callee *callee;
 	struct rb_node *rb_node;
 
-	if(!node->stats[idx].has_callees)
+	if (!node->stats[idx].has_callees)
 		return;
 
-	if (node->sym) {
-		fprintf(output, "ob=%s\n", node->map->dso->long_name);
-		fprintf(output, "fl=%s\n", node->filename);
-		fprintf(output, "fn=%s\n", node->sym->name);
-	}else{
-		fprintf(output, "ob=%s\n", node->map ? node->map->dso->long_name
-						     : "");
-		fprintf(output, "fl=\n");
-		fprintf(output, "fn=\n");
-	}
+	if (node->sym)
+		fprintf(output, "ob=%s\nfl=%s\nfn=%s\n",
+			node->map->dso->long_name, node->filename, node->sym->name);
+	else
+		fprintf(output, "ob=%s\nfl=\nfn=\n",
+			node->map ? node->map->dso->long_name : "");
 
-	for(rb_node = rb_first(&node->callees); rb_node; rb_node = rb_next(rb_node)){
-		callee = rb_entry(rb_node, struct callee_node, rb_node);
+	for (rb_node = rb_first(&node->callees); rb_node; rb_node = rb_next(rb_node)) {
+		callee = rb_entry(rb_node, struct callee, rb_node);
 		print_callee(callee, idx);
 	}
 }
@@ -422,19 +461,21 @@ static void print_calls(void)
 	struct graph_node *node;
 	u64 i = 0;
 
-	for(rb_node = rb_first(&graph_root); rb_node; rb_node = rb_next(rb_node)){
+	for (rb_node = rb_first(&graph_root); rb_node; rb_node = rb_next(rb_node)) {
 		node = rb_entry(rb_node, struct graph_node, rb_node);
 
-		for(i = 0; i < nr_events; i++)
+		for (i = 0; i < nr_events; i++)
 			print_caller(node, i);
 	}
 }
 
 static int __cmd_convert(struct perf_convert *cnv)
 {
-	int ret, i = 0;
+	int ret;
+	unsigned i = 0;
 	struct perf_session *session;
 	struct perf_evsel *pos;
+	char output_filename[100];
 
 	session = perf_session__new(cnv->input_name, O_RDONLY,
 				    cnv->force, false, &cnv->tool);
@@ -456,12 +497,16 @@ static int __cmd_convert(struct perf_convert *cnv)
 
 	output_files = malloc(sizeof(*output_files)*nr_events);
 	list_for_each_entry(pos, &session->evlist->entries, node) {
-	 	const char *evname = perf_evsel__name(pos);
-		output_files[i] = fopen(evname, "w");
+		const char *evname = perf_evsel__name(pos);
 
-      		if (!output_files[i]){
-	      		fprintf(stderr, "Cannot open %s for output\n", evname);
-	      		return -1;
+		snprintf(output_filename, sizeof(output_filename), "%s_%s",
+			 cnv->output_prefix, evname);
+		output_files[i] = fopen(output_filename, "w");
+
+		if (!output_files[i]) {
+			fprintf(stderr, "Cannot open %s for output\n",
+				output_filename);
+			return -1;
 		}
 
 		print_header(evname, i++);
@@ -469,6 +514,9 @@ static int __cmd_convert(struct perf_convert *cnv)
 
 	print_functions();
 	print_calls();
+
+	for (i = 0; i < nr_events; i++)
+		fclose(output_files[i]);
 
 out_delete:
 	/*
@@ -503,12 +551,13 @@ int cmd_convert(int argc, const char **argv, const char *prefix __maybe_unused)
 			.ordered_samples = true,
 			.ordering_requires_timestamps = true,
 		},
-		.output_name = "callgrind"
+		.output_prefix = "callgrind"
 	};
 	const struct option options[] = {
 	OPT_STRING('i', "input", &convert.input_name, "file",
 		    "input file name"),
-	OPT_STRING('o', "output", &convert.output_name, "output", "output filename prefix, default is callgrind"),
+	OPT_STRING('o', "output", &convert.output_prefix, "output", "output "
+		   "filename prefix, default is callgrind"),
 	OPT_STRING('d', "dsos", &symbol_conf.dso_list_str, "dso[,dso...]",
 		   "only consider symbols in these dsos"),
 	OPT_BOOLEAN('f', "force", &convert.force, "don't complain, do it"),
