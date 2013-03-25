@@ -399,7 +399,6 @@ LIB_H += util/intlist.h
 LIB_H += util/perf_regs.h
 LIB_H += util/unwind.h
 LIB_H += util/vdso.h
-LIB_H += util/cgcnv.h
 LIB_H += util/a2l.h
 LIB_H += ui/helpline.h
 LIB_H += ui/progress.h
@@ -474,7 +473,6 @@ LIB_OBJS += $(OUTPUT)util/rblist.o
 LIB_OBJS += $(OUTPUT)util/intlist.o
 LIB_OBJS += $(OUTPUT)util/vdso.o
 LIB_OBJS += $(OUTPUT)util/stat.o
-LIB_OBJS += $(OUTPUT)util/cgcnv.o
 LIB_OBJS += $(OUTPUT)util/a2l.o
 
 LIB_OBJS += $(OUTPUT)ui/setup.o
