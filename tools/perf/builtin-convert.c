@@ -41,7 +41,6 @@ struct stats {
 };
 
 struct graph_node {
-	u64 address;
 	const char *filename;
 	struct rb_node rb_node;
 	struct map *map;
@@ -54,7 +53,6 @@ struct callee {
 	struct rb_node rb_node;
 	struct map *map;
 	struct symbol *sym;
-	u64 address;
 	u64 hits[0];
 };
 
@@ -65,42 +63,95 @@ static u64 last_off;
 static FILE **output_files;
 static struct rb_root graph_root;
 
-static struct graph_node *add_graph_node(struct map *map, struct symbol *sym,
-					 u64 ip)
+static inline int64_t cmp_null(void *l, void *r)
+{
+	if (!l && !r)
+		return 0;
+	else if (!l)
+		return -1;
+	else
+		return 1;
+}
+
+static int64_t map_cmp(struct map *map_l, struct map *map_r)
+{
+	struct dso *dso_l = map_l ? map_l->dso : NULL;
+	struct dso *dso_r = map_r ? map_r->dso : NULL;
+	const char *dso_name_l, *dso_name_r;
+
+	if (!dso_l || !dso_r)
+		return cmp_null(dso_l, dso_r);
+
+	if (verbose) {
+		dso_name_l = dso_l->long_name;
+		dso_name_r = dso_r->long_name;
+	} else {
+		dso_name_l = dso_l->short_name;
+		dso_name_r = dso_r->short_name;
+	}
+
+	return strcmp(dso_name_l, dso_name_r);
+}
+
+static int64_t sym_cmp(struct symbol *sym_l, struct symbol *sym_r)
+{
+	u64 ip_l, ip_r;
+
+	if (!sym_l || !sym_r)
+		return cmp_null(sym_l, sym_r);
+
+	if (sym_l == sym_r)
+		return 0;
+
+	ip_l = sym_l->start;
+	ip_r = sym_r->start;
+
+	return (int64_t)(ip_r - ip_l);
+}
+
+static inline int64_t map_sym_cmp(struct map *map_l, struct symbol *sym_l, 
+				  struct map *map_r, struct symbol *sym_r)
+{
+	int64_t cmp = map_cmp(map_l, map_r);
+
+	if (!cmp)
+		return sym_cmp(sym_l, sym_r);
+	else
+		return cmp;
+}
+
+static struct graph_node *add_graph_node(struct map *map, struct symbol *sym)
 {
 	struct rb_node **rb_node = &(&graph_root)->rb_node, *parent = NULL;
 	struct graph_node *node;
-	u64 address;
-
-	if (sym)
-		address = map->start + sym->start;
-	else if (map)
-		address = map->start;
-	else
-		address = ip;
+	int64_t cmp;
 
 	while (*rb_node) {
 		parent = *rb_node;
 		node = rb_entry(parent, struct graph_node, rb_node);
+		cmp = map_sym_cmp(map, sym, node->map, node->sym);
 
-		if (address < node->address)
+		if (cmp < 0)
 			rb_node = &(*rb_node)->rb_left;
-		else if (address > node->address)
+		else if (cmp > 0)
 			rb_node = &(*rb_node)->rb_right;
-		else
+		else {
+			if (map != node->map){
+				node->map = map;
+				if (map)
+					map->referenced = true;
+			}
+
 			return node;
+		}
 	}
 
 	node = zalloc(sizeof(*node) + nr_events * sizeof(node->stats[0]));
 	if (node) {
 		node->map = map;
 		node->sym = sym;
-		node->address = address;
 		node->filename = "";
 		node->callees = RB_ROOT;
-
-		if (map)
-			map->referenced = true;
 
 		rb_link_node(&node->rb_node, parent, rb_node);
 		rb_insert_color(&node->rb_node, &graph_root);
@@ -109,17 +160,19 @@ static struct graph_node *add_graph_node(struct map *map, struct symbol *sym,
 	return node;
 }
 
-static struct graph_node *get_graph_node(u64 address)
+static struct graph_node *get_graph_node(struct map *map, struct symbol *sym)
 {
 	struct rb_node *rb_node = (&graph_root)->rb_node;
 	struct graph_node *node;
+	int64_t cmp;
 
 	while (rb_node) {
 		node = rb_entry(rb_node, struct graph_node, rb_node);
+		cmp = map_sym_cmp(map, sym, node->map, node->sym);
 
-		if (address < node->address)
+		if (cmp < 0)
 			rb_node = rb_node->rb_left;
-		else if (address > node->address)
+		else if (cmp > 0)
 			rb_node = rb_node->rb_right;
 		else
 			return node;
@@ -129,31 +182,30 @@ static struct graph_node *get_graph_node(u64 address)
 }
 
 static int graph_node__add_callee(struct graph_node *caller, struct map *map,
-				  struct symbol *sym, u64 ip, int idx)
+				  struct symbol *sym, int idx)
 {
 	struct rb_node **rb_node = &caller->callees.rb_node, *parent = NULL;
 	struct callee *callee;
-	u64 address;
-
-	if (sym)
-		address = map->start + sym->start;
-	else if (map)
-		address = map->start;
-	else
-		address = ip;
-
+	int64_t cmp;
 
 	while (*rb_node) {
 		parent = *rb_node;
 		callee = rb_entry(parent, struct callee, rb_node);
+		cmp = map_sym_cmp(map, sym, callee->map, callee->sym);
 
-		if (address < callee->address)
+		if (cmp < 0)
 			rb_node = &(*rb_node)->rb_left;
-		else if (address > callee->address)
+		else if (cmp > 0)
 			rb_node = &(*rb_node)->rb_right;
 		else{
 			callee->hits[idx]++;
 			caller->stats[idx].has_callees = true;
+
+			if (map != callee->map){
+				callee->map = map;
+				if (map)
+					map->referenced = true;
+			}
 
 			return 0;
 		}
@@ -163,12 +215,8 @@ static int graph_node__add_callee(struct graph_node *caller, struct map *map,
 	if (callee) {
 		callee->map = map;
 		callee->sym = sym;
-		callee->address = address;
 		callee->hits[idx] = 1;
 		caller->stats[idx].has_callees = true;
-
-		if (map)
-			map->referenced = true;
 
 		rb_link_node(&callee->rb_node, parent, rb_node);
 		rb_insert_color(&callee->rb_node, &caller->callees);
@@ -197,12 +245,11 @@ static int add_callchain_to_callgraph(int idx)
 		if (!caller)
 			break;
 
-		node = add_graph_node(caller->map, caller->sym, caller->ip);
+		node = add_graph_node(caller->map, caller->sym);
 		if (!node)
 			return -ENOMEM;
 
-		err = graph_node__add_callee(node, callee->map, callee->sym,
-					     callee->ip, idx);
+		err = graph_node__add_callee(node, callee->map, callee->sym, idx);
 		if (err)
 			return err;
 
@@ -227,7 +274,7 @@ static int accumulate_sample(struct perf_evsel *evsel, struct perf_sample *sampl
 			return err;
 	}
 
-	node = add_graph_node(al->map, al->sym, al->addr);
+	node = add_graph_node(al->map, al->sym);
 	if (!node)
 		return -ENOMEM;
 
@@ -384,7 +431,7 @@ static void print_function(struct graph_node *node, int idx)
 	map = node->map;
 	sym = node->sym;
 
-	if (!map || !map->dso || !sym || addr2line_init(map->dso->long_name)) {
+	if (!map || !sym || addr2line_init(map->dso->long_name)) {
 		print_function_summary(node, idx);
 		return;
 	}
@@ -427,7 +474,7 @@ static void print_callee(struct callee *callee, int idx)
 		return;
 
 	if (callee->sym) {
-		callee_node = get_graph_node(callee->address);
+		callee_node = get_graph_node(callee->map, callee->sym);
 		fprintf(output, "cob=%s\ncfl=%s\ncfn=%s\n",
 			callee->map->dso->long_name, callee_node->filename,
 			callee->sym->name);
