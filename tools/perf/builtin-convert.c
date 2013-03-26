@@ -139,6 +139,9 @@ static struct graph_node *add_graph_node(struct map *map, struct symbol *sym)
 			if (map != node->map)
 				node->map = map;
 
+			if (map)
+				map->referenced = true;
+
 			return node;
 		}
 	}
@@ -203,6 +206,9 @@ static int graph_node__add_callee(struct graph_node *caller, struct map *map,
 
 			if (map != callee->map)
 				callee->map = map;
+
+			if (map)
+				map->referenced = true;
 
 			return 0;
 		}
