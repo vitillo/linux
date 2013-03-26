@@ -354,7 +354,8 @@ static void print_function_summary(struct graph_node *node, int idx)
 {
 	FILE *output = output_files[idx];
 
-	fprintf(output, "ob=%s\n", node->map ? node->map->dso->long_name : "");
+	fprintf(output, "ob=%s\n", node->map && node->map->dso ? 
+		node->map->dso->long_name : "");
 
 	/* Without the empty fl declaration kcachegrind would apply the last
 	 * valid fl declaration in the file*/
@@ -377,7 +378,7 @@ static void print_function(struct graph_node *node, int idx)
 	map = node->map;
 	sym = node->sym;
 
-	if (!map || !sym || addr2line_init(map->dso->long_name)) {
+	if (!map || !map->dso || !sym || addr2line_init(map->dso->long_name)) {
 		print_function_summary(node, idx);
 		return;
 	}
