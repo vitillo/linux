@@ -99,6 +99,9 @@ static struct graph_node *add_graph_node(struct map *map, struct symbol *sym,
 		node->filename = "";
 		node->callees = RB_ROOT;
 
+		if (map)
+			map->referenced = true;
+
 		rb_link_node(&node->rb_node, parent, rb_node);
 		rb_insert_color(&node->rb_node, &graph_root);
 	}
@@ -163,6 +166,9 @@ static int graph_node__add_callee(struct graph_node *caller, struct map *map,
 		callee->address = address;
 		callee->hits[idx] = 1;
 		caller->stats[idx].has_callees = true;
+
+		if (map)
+			map->referenced = true;
 
 		rb_link_node(&callee->rb_node, parent, rb_node);
 		rb_insert_color(&callee->rb_node, &caller->callees);
